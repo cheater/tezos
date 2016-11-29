@@ -33,6 +33,7 @@ type server = (* hidden *)
 module ConnectionMap = Map.Make(Cohttp.Connection)
 
 exception Invalid_method
+exception Options_preflight
 exception Cannot_parse_body of string
 
 (* Promise a running RPC server. Takes the address and port. *)
@@ -77,6 +78,7 @@ let launch addr port root =
                | Ok body -> Lwt.return (Some body)
              end
            | `GET -> Lwt.return None
+           | `OPTIONS -> Lwt.fail Options_preflight
            | _ -> Lwt.fail Invalid_method
          end >>= fun body ->
          handler body >>= fun { Answer.code ; body } ->
@@ -93,7 +95,11 @@ let launch addr port root =
            (if Cohttp.Code.is_error code
             then "failed"
             else "success") >>= fun () ->
-         Lwt.return (Response.make ~flush:true ~status:(`Code code) (), body))
+         let headers =
+           Cohttp.Header.add_multi (Cohttp.Header.init ())
+             "Access-Control-Allow-Origin" ["*"] in
+         Lwt.return (Response.make
+                       ~flush:true ~status:(`Code code) ~headers (), body))
       (function
         | Not_found | Cannot_parse _ ->
             lwt_log_info "(%s) not found"
@@ -106,6 +112,9 @@ let launch addr port root =
             let headers =
               Cohttp.Header.add_multi (Cohttp.Header.init ())
                 "Allow" ["POST"] in
+           let headers =
+             Cohttp.Header.add_multi headers
+               "Access-Control-Allow-Origin" ["*"] in
             Lwt.return (Response.make
                           ~flush:true ~status:`Method_not_allowed
                           ~headers (),
@@ -115,6 +124,17 @@ let launch addr port root =
               (Cohttp.Connection.to_string con) >>= fun () ->
             Lwt.return (Response.make ~flush:true ~status:`Bad_request (),
                         Cohttp_lwt_body.of_string msg)
+        | Options_preflight ->
+            lwt_log_info "(%s) RPC preflight"
+              (Cohttp.Connection.to_string con) >>= fun () ->
+            let headers =
+              Cohttp.Header.add_multi (Cohttp.Header.init ())
+                "Access-Control-Allow-Origin" ["*"] in
+            let headers =
+              Cohttp.Header.add_multi headers
+                "Access-Control-Allow-Headers" ["content-type"] in
+            Lwt.return (Response.make ~flush:true ~status:(`Code 200) ~headers (),
+                        Cohttp_lwt_body.empty)
         | e -> Lwt.fail e)
   and conn_closed (_, con) =
     log_info "connection close %s" (Cohttp.Connection.to_string con) ;
